@@ -6,7 +6,8 @@
 __all__ = ['SCOPES', 'auth_google_drive', 'fetch_supernote_notebooks', 'recents', 'download_notebook', 'load_notebook',
            'page_to_png', 'page_to_prompt', 'sha256_bytes', 'sha256_text', 'PenmanDB', 'couplenb', 'page_png_hash',
            'find_coupling', 'find_changed_nb_pages', 'penman_prompt_transcription', 'current_cell_text_hash',
-           'insertion_point_for_new_page', 'updatenb', 'poll_drive_and_update_modified_nbs', 'daemon']
+           'insertion_point_for_new_page', 'updatenb', 'poll_drive_and_update_modified_nbs', 'daemon',
+           'update_dialog_paths']
 
 # %% ../nbs/01-supernote-to-solveit.ipynb #a54543a8
 import asyncio
@@ -367,7 +368,11 @@ async def couplenb(
         db = PenmanDB()
     if dialog_name is None:
         d = await curr_dialog()
-        dialog_name = d["name"] if isinstance(d, dict) else d
+        dialog_name = "/" + (d["name"] if isinstance(d, dict) else d)
+    elif not dialog_name.startswith("/"):
+        d = await curr_dialog()
+        curr_name = d["name"] if isinstance(d, dict) else d
+        dialog_name = "/" + str(Path(curr_name).parent / dialog_name)
 
     nb = load_notebook(nb_dict)
 
@@ -391,6 +396,7 @@ async def couplenb(
             insert_placement = 'at_end',
             run=run,
             wait=False,
+            dialog_name=dialog_name,
         )
         page_png_hash = sha256_bytes(Path(res["image_path"]).read_bytes())
         cell_text_hash = sha256_text(res["cell_contents"].strip())
@@ -731,6 +737,7 @@ async def poll_drive_and_update_modified_nbs(
                 origin_process=origin_process,
             )
             results["updated"].append(sync_res)
+            print({k: len(v) for k,v in sync_res["results"].items()}, flush=True)
 
         except Exception as e:
             results["errors"].append({
@@ -763,6 +770,97 @@ async def daemon(interval=60, db=None, service=None, run_new=False):
             "unchanged": len(res["unchanged"]),
             "errors": len(res["errors"]),
         })
+        print(json.dumps(res["updated"], default=str, indent=2)[:4000], flush=True)
         if res["errors"]:
             print(res["errors"])
         await asyncio.sleep(max(0, interval - (time.time() - started)))
+
+# %% ../nbs/01-supernote-to-solveit.ipynb #fe52f52c
+from difflib import SequenceMatcher
+from pathlib import Path
+import sqlite3
+
+def _norm_dname(s):
+    """Normalize a Solveit dialog name to /path/without/ipynb."""
+    if not s: return s
+    s = str(s).removesuffix(".ipynb")
+    return s if s.startswith("/") else "/" + s
+
+def _dialog_candidates(root="/app/data"):
+    """Return absolute Solveit dnames for every ipynb under root."""
+    root = Path(root)
+    res = []
+    for p in root.rglob("*.ipynb"):
+        if ".ipynb_checkpoints" in p.parts: continue
+        rel = p.relative_to(root).with_suffix("")
+        res.append("/" + rel.as_posix())
+    return sorted(res)
+
+def _best_dialog_match(old, candidates):
+    """Find closest candidate dname to an old stored dname."""
+    old = _norm_dname(old)
+    if old in candidates:
+        return old, 1.0
+
+    old_base = Path(old).name
+    best = None
+    best_score = -1
+
+    for cand in candidates:
+        cand_base = Path(cand).name
+
+        # Prefer basename similarity, but include full path as a tiebreaker.
+        base_score = SequenceMatcher(None, old_base, cand_base).ratio()
+        full_score = SequenceMatcher(None, old, cand).ratio()
+        score = 0.75 * base_score + 0.25 * full_score
+
+        if score > best_score:
+            best = cand
+            best_score = score
+
+    return best, best_score
+
+# %% ../nbs/01-supernote-to-solveit.ipynb #85fd7c4d
+def update_dialog_paths(
+    db_path="/app/data/penman/penman.sqlite",
+    root="/app/data",
+    dry_run=True,
+    cutoff=0.55,
+):
+    """Update coupling dialog_name values to closest existing Solveit dialog paths.
+
+    Returns a list of proposed/applied changes.
+    """
+    candidates = _dialog_candidates(root)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+
+    rows = [dict(r) for r in conn.execute(
+        "SELECT id, drive_id, drive_name, dialog_name FROM couplings"
+    ).fetchall()]
+
+    changes = []
+    for row in rows:
+        old = _norm_dname(row["dialog_name"])
+        new, score = _best_dialog_match(old, candidates)
+
+        rec = {
+            **row,
+            "old_dialog_name": row["dialog_name"],
+            "new_dialog_name": new,
+            "score": score,
+            "changed": new != row["dialog_name"] and score >= cutoff,
+
+        }
+        changes.append(rec)
+
+        if rec["changed"] and not dry_run:
+            conn.execute(
+                "UPDATE couplings SET dialog_name=? WHERE id=?",
+                (new, row["id"]),
+            )
+
+    if not dry_run:
+        conn.commit()
+    conn.close()
+    return changes
