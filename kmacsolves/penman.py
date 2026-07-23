@@ -57,9 +57,9 @@ def _resolve_folder_id(service, path_parts):
         parent = files[0]["id"]
     return parent
 
-def fetch_supernote_notebooks(service):
+def fetch_supernote_notebooks(service, subfolder=None):
     """List .note files in Supernote/Note/, ordered by most recently modified."""
-    folder_id = _resolve_folder_id(service, ["Supernote", "Note"])
+    folder_id = _resolve_folder_id(service, ["Supernote", "Note", subfolder]) if subfolder else _resolve_folder_id(service, ["Supernote", "Note"])
     results = service.files().list(
         q=f"'{folder_id}' in parents and name contains '.note'",
         fields="files(id, name, modifiedByMeTime)",
@@ -69,9 +69,9 @@ def fetch_supernote_notebooks(service):
     return results.get("files", [])
 
 # %% ../nbs/01-supernote-to-solveit.ipynb #5181877f
-def recents(service=None, n=5):
+def recents(service=None, n=5, subfolder = None):
     if service is None: service = auth_google_drive()
-    notebooks = fetch_supernote_notebooks(service)
+    notebooks = fetch_supernote_notebooks(service, subfolder=subfolder)
     for i, nb in enumerate(notebooks[:n], 0):
         print(f"{i}. {nb['name']}  (modified {nb['modifiedByMeTime'][:10]})")
     return notebooks[:n]
