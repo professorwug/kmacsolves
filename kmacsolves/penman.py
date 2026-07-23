@@ -21,10 +21,10 @@ from googleapiclient.errors import HttpError
 
 SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
 
-def auth_google_drive():
+def auth_google_drive(token_path = '/app/data/.secrets/drive_token.json'):
     creds = None
-    if os.path.exists("/app/data/token.json"):
-        creds = Credentials.from_authorized_user_file("/app/data/token.json", SCOPES)
+    if os.path.exists(token_path):
+        creds = Credentials.from_authorized_user_file(token_path, SCOPES)
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
@@ -40,7 +40,7 @@ def auth_google_drive():
             }
             flow = InstalledAppFlow.from_client_config(client_config, SCOPES)
             creds = flow.run_local_server(port=0, open_browser=False)
-        with open("token.json", "w") as token:
+        with open(token_path, "w") as token:
             token.write(creds.to_json())
     return build("drive", "v3", credentials=creds)
 
