@@ -696,6 +696,7 @@ async def updatenb(
     }
 
 # %% ../nbs/01-supernote-to-solveit.ipynb #281d38fd
+import traceback
 async def poll_drive_and_update_modified_nbs(
     db=None,
     service=None,
@@ -747,10 +748,7 @@ async def poll_drive_and_update_modified_nbs(
             # print({k: len(v) for k,v in sync_res["results"].items()}, flush=True)
 
         except Exception as e:
-            results["errors"].append({
-                "coupling": coupling,
-                "error": repr(e),
-            })
+            results["errors"].append({"coupling": coupling, "error": repr(e), "traceback": traceback.format_exc()})
 
     return results
 
