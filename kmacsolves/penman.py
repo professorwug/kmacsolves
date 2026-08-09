@@ -6,7 +6,8 @@
 __all__ = ['SCOPES', 'auth_google_drive', 'fetch_supernote_notebooks', 'recents', 'download_notebook', 'load_notebook',
            'page_to_png', 'page_to_prompt', 'sha256_bytes', 'sha256_text', 'PenmanDB', 'couplenb', 'page_png_hash',
            'find_coupling', 'find_changed_nb_pages', 'penman_prompt_transcription', 'current_cell_text_hash',
-           'insertion_point_for_new_page', 'poll_drive_and_update_modified_nbs', 'daemon', 'update_dialog_paths']
+           'insertion_point_for_new_page', 'updatenb', 'poll_drive_and_update_modified_nbs', 'daemon',
+           'update_dialog_paths']
 
 # %% ../nbs/01-supernote-to-solveit.ipynb #a54543a8
 import asyncio
@@ -528,6 +529,178 @@ def insertion_point_for_new_page(page_idx, current_pages, old_pages):
         if p["page_idx"] > page_idx and p["page_id"] in old_pages:
             return "add_before", old_pages[p["page_id"]]["cell_id"]
     return "at_end", ""
+
+# %% ../nbs/01-supernote-to-solveit.ipynb #076d03dc
+async def _msg_exists(cell_id, dname=""):
+    try:
+        await read_msgid(cell_id, dname=dname)
+        return True
+    except Exception:
+        return False
+#| export
+async def updatenb(
+    drive_id=None,
+    drive_name=None,
+    dialog_name=None,
+    db=None,
+    run_new=False,
+    origin_process="manual", # logging for locks
+):
+    """Sync one coupled Supernote notebook into its Solveit dialog."""
+    if db is None:
+        db = PenmanDB()
+    coupling = find_coupling(db, drive_id=drive_id, drive_name=drive_name, dialog_name=dialog_name)
+
+    if not db.acquire_coupling_lock(coupling_id=coupling["id"], locked_by=origin_process):
+        raise RuntimeError("Coupling is already locked")
+    try:
+        changes = await find_changed_nb_pages(
+            drive_id=drive_id,
+            drive_name=drive_name,
+            dialog_name=dialog_name,
+            db=db,
+        )
+
+        coupling = changes["coupling"]
+        nb = changes["notebook"]
+        nb_meta = changes["notebook_meta"]
+        dname = coupling["dialog_name"]
+        # Prune DB page rows whose Solveit cells no longer exist.
+        for prow in db.list_pages(coupling_id=coupling["id"]):
+            try: await read_msgid(prow["cell_id"], dname=dname)
+            except Exception:
+                db.delete_page(coupling_id=coupling["id"], page_id=prow["page_id"])
+                results.setdefault("pruned", []).append(prow)
+
+        old_pages = {
+            row["page_id"]: row
+            for row in db.list_pages(coupling_id=coupling["id"])
+        }
+
+        results = {
+            "new": [],
+            "changed_replaced": [],
+            "changed_conflicted": [],
+            "removed": [],
+            "reordered": [],
+        }
+
+        # 1. Removed pages: delete prompt cell and DB row.
+        for old in changes["removed_pages"]:
+            try: await del_msgs(old["cell_id"], dname=dname)
+            except Exception: pass
+            db.delete_page(coupling_id=coupling["id"], page_id=old["page_id"])
+            results["removed"].append(old)
+
+        # 2. Changed pages: replace if cell untouched; otherwise insert above old.
+        for chg in changes["changed_pages"]:
+            old = chg["old"]
+            cur_hash = await current_cell_text_hash(old["cell_id"], dname)
+
+            if cur_hash == old["cell_text_hash"]:
+                res = await page_to_prompt(
+                    nb,
+                    page_idx=chg["page_idx"],
+                    notebook_key=coupling["drive_id"],
+                    insert_placement="replace",
+                    insert_id=old["cell_id"],
+                    dialog_name=dname,
+                    run=False,
+                    wait=False,
+                )
+                bucket = "changed_replaced"
+            else:
+                res = await page_to_prompt(
+                    nb,
+                    page_idx=chg["page_idx"],
+                    notebook_key=coupling["drive_id"],
+                    insert_placement="add_before",
+                    insert_id=old["cell_id"],
+                    dialog_name=dname,
+                    run=run_new,
+                    wait=False,
+                )
+                bucket = "changed_conflicted"
+
+            db.upsert_page(
+                coupling_id=coupling["id"],
+                page_id=res["page_id"],
+                page_index=chg["page_idx"],
+                cell_id=res["msg_id"],
+                image_path=res["image_path"],
+                page_png_hash=sha256_bytes(Path(res["image_path"]).read_bytes()),
+                cell_text_hash=sha256_text(res["cell_contents"].strip()),
+            )
+            results[bucket].append(res)
+
+        # Refresh old_pages after changed pages may have updated cell ids.
+        old_pages = {
+            row["page_id"]: row
+            for row in db.list_pages(coupling_id=coupling["id"])
+        }
+
+        # 3. New pages: insert before next known page, or at end.
+        for new in sorted(changes["new_pages"], key=lambda p: p["page_idx"]):
+            placement, insert_id = insertion_point_for_new_page(
+                new["page_idx"],
+                changes["current_pages"],
+                old_pages,
+            )
+
+            res = await page_to_prompt(
+                nb,
+                page_idx=new["page_idx"],
+                notebook_key=coupling["drive_id"],
+                insert_placement=placement,
+                insert_id=insert_id,
+                dialog_name=dname,
+                run=run_new,
+                wait=False,
+            )
+
+            db.upsert_page(
+                coupling_id=coupling["id"],
+                page_id=res["page_id"],
+                page_index=new["page_idx"],
+                cell_id=res["msg_id"],
+                image_path=res["image_path"],
+                page_png_hash=sha256_bytes(Path(res["image_path"]).read_bytes()),
+                cell_text_hash=sha256_text(res["cell_contents"].strip()),
+            )
+            old_pages[res["page_id"]] = db.get_page(coupling_id=coupling["id"], page_id=res["page_id"])
+            results["new"].append(res)
+
+        # 4. Reordered unchanged pages: only update DB page_index.
+        for reo in changes["reordered_pages"]:
+            old = db.get_page(coupling_id=coupling["id"], page_id=reo["page_id"])
+            if old is None:
+                continue
+            db.upsert_page(
+                coupling_id=coupling["id"],
+                page_id=old["page_id"],
+                page_index=reo["page_idx"],
+                cell_id=old["cell_id"],
+                image_path=old["image_path"],
+                page_png_hash=old["page_png_hash"],
+                cell_text_hash=old["cell_text_hash"],
+            )
+            results["reordered"].append(reo)
+
+        # Update Drive metadata on the coupling row.
+        db.couple(
+            drive_id=coupling["drive_id"],
+            drive_name=nb_meta["name"],
+            dialog_name=dname,
+            drive_modified_time=nb_meta.get("modifiedByMeTime"),
+        )
+    finally:
+        db.release_coupling_lock(coupling_id=coupling["id"], locked_by=origin_process)
+
+    return {
+        "coupling": db.get_coupling(drive_id=coupling["drive_id"]),
+        "changes": changes,
+        "results": results,
+    }
 
 # %% ../nbs/01-supernote-to-solveit.ipynb #281d38fd
 async def poll_drive_and_update_modified_nbs(
