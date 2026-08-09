@@ -554,6 +554,13 @@ async def updatenb(
     if not db.acquire_coupling_lock(coupling_id=coupling["id"], locked_by=origin_process):
         raise RuntimeError("Coupling is already locked")
     try:
+        dname = coupling["dialog_name"]
+        results = {"new": [], "changed_replaced": [], "changed_conflicted": [], "removed": [], "reordered": []}
+        for prow in db.list_pages(coupling_id=coupling["id"]):
+            try: await read_msgid(prow["cell_id"], dname=dname)
+            except Exception:
+                db.delete_page(coupling_id=coupling["id"], page_id=prow["page_id"])
+                results.setdefault("pruned", []).append(prow)
         changes = await find_changed_nb_pages(
             drive_id=drive_id,
             drive_name=drive_name,
@@ -564,26 +571,12 @@ async def updatenb(
         coupling = changes["coupling"]
         nb = changes["notebook"]
         nb_meta = changes["notebook_meta"]
-        dname = coupling["dialog_name"]
-        # Prune DB page rows whose Solveit cells no longer exist.
-        for prow in db.list_pages(coupling_id=coupling["id"]):
-            try: await read_msgid(prow["cell_id"], dname=dname)
-            except Exception:
-                db.delete_page(coupling_id=coupling["id"], page_id=prow["page_id"])
-                results.setdefault("pruned", []).append(prow)
 
         old_pages = {
             row["page_id"]: row
             for row in db.list_pages(coupling_id=coupling["id"])
         }
 
-        results = {
-            "new": [],
-            "changed_replaced": [],
-            "changed_conflicted": [],
-            "removed": [],
-            "reordered": [],
-        }
 
         # 1. Removed pages: delete prompt cell and DB row.
         for old in changes["removed_pages"]:
