@@ -69,5 +69,4 @@ d = { 'settings': { 'branch': 'main',
                                    'kmacsolves.penman.sha256_bytes': ('01-supernote-to-solveit.html#sha256_bytes', 'kmacsolves/penman.py'),
                                    'kmacsolves.penman.sha256_text': ('01-supernote-to-solveit.html#sha256_text', 'kmacsolves/penman.py'),
                                    'kmacsolves.penman.update_dialog_paths': ( '01-supernote-to-solveit.html#update_dialog_paths',
-                                                                              'kmacsolves/penman.py'),
-                                   'kmacsolves.penman.updatenb': ('01-supernote-to-solveit.html#updatenb', 'kmacsolves/penman.py')}}}
+                                                                              'kmacsolves/penman.py')}}}
