@@ -131,6 +131,7 @@ async def page_to_prompt(
     First downloads the specified page as a png to `app/data/penman/pages/notebook_key/page_id`.
     TODO: prompt cell currently inserted at the end of the dialog. Make this customizable.
     """
+    insert_id = _norm_msg_id(insert_id)
     page_number = page_idx if page_idx >= 0 else len(nb.pages)+page_idx
     page = nb.get_page(page_number)
     page_id = page.metadata.get("PAGEID", f"page_{page_number}")
@@ -182,7 +183,11 @@ async def page_to_prompt(
         await update_msg(id=insert_id, content=content, msg_type="prompt", dname=dialog_name or '')
         msg_id = insert_id
     else:
-        msg_id = await add_msg(content, msg_type="prompt", run=run, wait=wait, placement = insert_placement, id=insert_id, dname=dialog_name or "")
+        try: msg_id = await add_msg(content, msg_type="prompt", run=run, wait=wait, placement=insert_placement, id=insert_id, dname=dialog_name or "")
+        except Exception as e:
+            if "Reference message not found" not in str(e) or insert_placement not in ("add_before", "add_after"): raise
+            msg_id = await add_msg(content, msg_type="prompt", run=run, wait=wait, placement="at_end", dname=dialog_name or "")
+    msg_id = _norm_msg_id(msg_id)
     return {
         "msg_id": msg_id,
         "page_id": page_id,
@@ -203,6 +208,7 @@ def sha256_bytes(bs: bytes) -> str:
 def sha256_text(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
+def _norm_msg_id(msg_id): return msg_id.lstrip("_") if isinstance(msg_id, str) else msg_id
 class PenmanDB:
     def __init__(self, path="/app/data/penman/penman.sqlite"):
         self.path = Path(path)
@@ -241,6 +247,7 @@ class PenmanDB:
             UNIQUE(coupling_id, page_id)
         );
         """)
+        self.conn.execute("UPDATE pages SET cell_id=ltrim(cell_id, '_') WHERE substr(cell_id, 1, 1)='_'")
         self.conn.commit()
 
     def couple(self, *, drive_id, drive_name, dialog_name, drive_modified_time=None):
@@ -279,6 +286,7 @@ class PenmanDB:
         page_png_hash,
         cell_text_hash,
     ):
+        cell_id = _norm_msg_id(cell_id)
         now = time.time()
         self.conn.execute("""
         INSERT INTO pages
@@ -352,7 +360,6 @@ class PenmanDB:
                 WHERE id=? AND locked_by=?
             """, (coupling_id, locked_by))
         self.conn.commit()
-
 
 # %% ../nbs/01-supernote-to-solveit.ipynb #bd57335b
 from dialoghelper.solveitskill import curr_dialog
