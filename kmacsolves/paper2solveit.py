@@ -159,8 +159,13 @@ def split_markdown_into_cells(markdown_text):
 # %% ../nbs/02-paper2solveit.ipynb #e0d2f51c
 import re
 
-async def solve_markdown_paper(markdown_text, citation_patterns=None):
-    """Turn a markdown academic paper into appended solveit blocks for incremental reading."""
+async def solve_markdown_paper(markdown_text, citation_patterns=None, add=None):
+    """Turn a markdown academic paper into appended solveit blocks for incremental reading.
+
+    `add` is where the blocks go: `add_msg` by default, which appends to the dialog you're
+    reading in. Pass something else — see `NotebookBuilder` — to build a notebook file instead.
+    """
+    if add is None: add = add_msg
     
     if citation_patterns is None:
         citation_patterns = [
@@ -188,7 +193,7 @@ async def solve_markdown_paper(markdown_text, citation_patterns=None):
     
     # Add full bibliography at start (collapsed)
     if refs_section:
-        await add_msg(content=f"### Full References\n\n{refs_section}", 
+        await add(content=f"### Full References\n\n{refs_section}", 
                 placement='at_end', i_collapsed=1)
     
     # Track sections: {header_id: set_of_citations}
@@ -198,7 +203,7 @@ async def solve_markdown_paper(markdown_text, citation_patterns=None):
     for cell in cells:
         if cell.startswith('##'):
             # Add header and remember its ID
-            current_header_id = await add_msg(content=cell, placement='at_end')
+            current_header_id = await add(content=cell, placement='at_end')
             section_citations[current_header_id] = set()
         else:
             # Replace citations with footnotes
@@ -213,7 +218,7 @@ async def solve_markdown_paper(markdown_text, citation_patterns=None):
                             cite_text, f"[{all_citations[cite_text]}]", 1
                         )
             
-            await add_msg(content=modified_cell, placement='at_end')
+            await add(content=modified_cell, placement='at_end')
     
     # Now go back and insert cheatsheets after each header
     for header_id, citations in section_citations.items():
@@ -222,7 +227,7 @@ async def solve_markdown_paper(markdown_text, citation_patterns=None):
                 f"[{all_citations[c]}]: {c}" 
                 for c in sorted(citations, key=lambda x: all_citations[x])
             )
-            await add_msg(content=cheatsheet, placement='add_after', 
+            await add(content=cheatsheet, placement='add_after', 
                     id=header_id, i_collapsed=1)
 
 # %% ../nbs/02-paper2solveit.ipynb #462caa66

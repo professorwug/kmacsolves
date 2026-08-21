@@ -15,10 +15,12 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
 ]
-dependencies = []
+dependencies = ["fastcore", "httpx", "dialoghelper", "pyzotero"]
 
-[project.optional-dependencies]
-zotero = ["pyzotero"]
+[project.scripts]
+zot-ls = "kmacsolves.cli:zot_ls"
+zot-nb = "kmacsolves.cli:zot_nb"
+paper-nb = "kmacsolves.cli:paper_nb"
 
 [project.urls]
 Repository = "https://github.com/professorwug/kmacsolves"
