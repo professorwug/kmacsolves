@@ -106,7 +106,11 @@ def _md_title(md):
 
 async def _build(pdf, data, out, path, **kwargs):
     "Shared tail of the two converters: OCR to markdown, then lay it out as a notebook."
-    o = await pdf2md(str(pdf))
+    # Extracted figures are referenced as 'figures/x.jpg', relative to the notebook — so they
+    # have to be written beside it rather than into whatever directory you happened to run from.
+    dest = Path(out).parent if out else Path(path)
+    dest.mkdir(parents=True, exist_ok=True)
+    o = await pdf2md(str(pdf), path=dest)
     # A URL carries no metadata, so fall back to whatever the paper calls itself.
     if not data.get('title'): data = data | {'title': _md_title(o["markdown"]) or 'Paper'}
     b = NotebookBuilder(header=['from kmacsolves.paper2solveit import *',
