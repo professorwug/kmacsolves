@@ -17,6 +17,9 @@ classifiers = [
 ]
 dependencies = []
 
+[project.optional-dependencies]
+zotero = ["pyzotero"]
+
 [project.urls]
 Repository = "https://github.com/professorwug/kmacsolves"
 Documentation = "https://professorwug.github.io/kmacsolves/"

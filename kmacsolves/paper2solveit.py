@@ -5,7 +5,7 @@
 # %% auto #0
 __all__ = ['dlab_params', 'dlab_url', 'submit_marker', 'submit_markers', 'poll_marker', 'poll_markers', 'convert_pdf',
            'convert_pdfs', 'pdf2md', 'pdfs2md', 'download_to_temp', 'split_markdown_into_cells', 'solve_markdown_paper',
-           'paper2solveit']
+           'paper2solveit', 'ZoteroListing', 'list_zotero', 'zotero_download', 'zotero_pdf']
 
 # %% ../nbs/02-paper2solveit.ipynb #d5d73954
 from dialoghelper import *
@@ -248,5 +248,183 @@ __all__ = [
     'download_to_temp',
     'split_markdown_into_cells',
     'solve_markdown_paper',
-    'paper2solveit'
+    'paper2solveit',
+    'list_zotero', 'zotero_pdf', 'zotero_download', 'ZoteroListing',  # Zotero library support
 ]
+
+# %% ../nbs/02-paper2solveit.ipynb #a1f0c212
+# Zotero support: pull a paper straight from your own library instead of a public URL.
+import os, re
+from pathlib import Path
+from tempfile import NamedTemporaryFile
+
+def _zotero_client(library_id=None, api_key=None, library_type='user', local=False):
+    "Build a pyzotero client, defaulting to the `ZOTERO_USER_ID`/`ZOTERO_API_KEY` env vars."
+    try: from pyzotero.zotero import Zotero
+    except ImportError:
+        try: from pyzotero import Zotero
+        except ImportError: raise ImportError(
+            "Zotero support needs pyzotero — install it with `pip install pyzotero`.") from None
+    library_id = library_id or os.environ.get('ZOTERO_USER_ID')
+    if not library_id: raise ValueError(
+        "No Zotero library id: set ZOTERO_USER_ID (find yours at zotero.org/settings/keys) "
+        "or pass library_id=.")
+    if local: return Zotero(library_id, library_type, local=True)
+    api_key = api_key or os.environ.get('ZOTERO_API_KEY')
+    if not api_key: raise ValueError(
+        "No Zotero API key: set ZOTERO_API_KEY (create one at zotero.org/settings/keys) "
+        "or pass api_key=, or use local=True to talk to a running Zotero 7 desktop app.")
+    return Zotero(library_id, library_type, api_key)
+
+# %% ../nbs/02-paper2solveit.ipynb #a1f0c214
+def _year(d):
+    "First 4-digit year in an item's date field, or '' if there isn't one."
+    m = re.search(r'\d{4}', d.get('date') or '')
+    return m.group(0) if m else ''
+
+def _authors(d):
+    "Short author string: 'Smith', 'Smith & Jones', or 'Smith et al.'"
+    cs = d.get('creators') or []
+    names = [c.get('lastName') or c.get('name') or '' for c in cs if c.get('creatorType') == 'author']
+    names = [n for n in (names or [c.get('lastName') or c.get('name') or '' for c in cs]) if n]
+    if not names: return ''
+    if len(names) == 1: return names[0]
+    if len(names) == 2: return f'{names[0]} & {names[1]}'
+    return f'{names[0]} et al.'
+
+def _describe(d):
+    "One-line human label for a Zotero item."
+    bits = [b for b in (_authors(d), _year(d)) if b]
+    title = d.get('title') or d.get('name') or d.get('filename') or '(untitled)'
+    return f"{title} — {', '.join(bits)}" if bits else title
+
+def _label(entry):
+    "How an entry appears in a listing: items get authors and a year, collections a size."
+    d = entry['data']
+    n = (entry.get('meta') or {}).get('numItems')
+    if d.get('itemType') is None and n is not None: return f"{_describe(d)} ({n})"
+    return _describe(d)
+
+# %% ../nbs/02-paper2solveit.ipynb #a1f0c216
+class ZoteroListing:
+    "A numbered list of Zotero collections or items; renders as markdown, indexes like a list."
+    def __init__(self, title, entries, kind):
+        self.title, self.entries, self.kind = title, entries, kind
+    def __len__(self): return len(self.entries)
+    def __iter__(self): return iter(self.entries)
+    def __getitem__(self, i):
+        "1-based lookup, matching the numbers shown in the listing."
+        if not 1 <= i <= len(self.entries): raise IndexError(
+            f"{i} is outside the listing (1–{len(self.entries)}).")
+        return self.entries[i-1]
+    def _lines(self): return [f"{i}. {_label(e)}" for i, e in enumerate(self.entries, 1)]
+    def _repr_markdown_(self):
+        if not self.entries: return f"**{self.title}** — nothing here."
+        return '\n'.join([f"**{self.title}**", ''] + self._lines())
+    def __repr__(self): return '\n'.join([self.title] + self._lines())
+
+# %% ../nbs/02-paper2solveit.ipynb #a1f0c218
+_last_listing = None  # what `list_zotero` showed most recently, so `zotero_pdf(n)` can resolve n
+
+def list_zotero(collection=None, **kwargs):
+    """List your Zotero collections, or the items inside one, numbered for use with `zotero_pdf`.
+
+    Args:
+        collection: a collection name (case-insensitive, partial matches allowed), or the
+            number of a collection from the previous `list_zotero()` listing. Omit it to
+            list the collections themselves.
+        **kwargs: passed to `_zotero_client` (library_id, api_key, library_type, local)
+    """
+    global _last_listing
+    zot = _zotero_client(**kwargs)
+    if isinstance(collection, int): collection = _resolve_number(collection, 'collection')['data']['name']
+    if collection is None:
+        cols = sorted(zot.everything(zot.collections()), key=lambda c: c['data']['name'].lower())
+        _last_listing = ZoteroListing('Zotero collections', cols, 'collection')
+    else:
+        col = _match_collection(zot, collection)
+        items = [i for i in zot.everything(zot.collection_items_top(col['key']))
+                 if i['data'].get('itemType') != 'note']
+        _last_listing = ZoteroListing(f"{col['data']['name']} ({len(items)} items)", items, 'item')
+    return _last_listing
+
+def _resolve_number(n, kind):
+    "Look up entry `n` in the last listing, checking it holds the kind of thing we want."
+    if _last_listing is None: raise ValueError(
+        f"No listing to index into — run `list_zotero()` first.")
+    if _last_listing.kind != kind: raise ValueError(
+        f"The last listing was of {_last_listing.kind}s, not {kind}s. "
+        f"Run `list_zotero({'' if kind == 'collection' else 'collection_name'})` first.")
+    return _last_listing[n]
+
+def _match_collection(zot, name):
+    "Find a collection by name: exact (case-insensitive) first, then substring."
+    cols = zot.everything(zot.collections())
+    exact = [c for c in cols if c['data']['name'].lower() == name.lower()]
+    if len(exact) == 1: return exact[0]
+    hits = exact or [c for c in cols if name.lower() in c['data']['name'].lower()]
+    if not hits: raise ValueError(
+        f"No Zotero collection matching {name!r}. Run `list_zotero()` to see them all.")
+    if len(hits) > 1: raise ValueError(
+        f"{name!r} matches several collections ({', '.join(c['data']['name'] for c in hits)}). "
+        "Use the full name, or its number from `list_zotero()`.")
+    return hits[0]
+
+# %% ../nbs/02-paper2solveit.ipynb #a1f0c21a
+def _pdf_key(zot, item):
+    "Item key of the PDF to convert: the item itself if it's a PDF, else its first PDF child."
+    d = item['data']
+    if d.get('itemType') == 'attachment':
+        if d.get('contentType') == 'application/pdf': return d['key']
+        raise ValueError(f"{_describe(d)!r} is a {d.get('contentType')} attachment, not a PDF.")
+    for ch in zot.children(d['key']):
+        cd = ch['data']
+        if cd.get('itemType') == 'attachment' and cd.get('contentType') == 'application/pdf':
+            return cd['key']
+    raise ValueError(f"No PDF attached to {_describe(d)!r}.")
+
+def zotero_download(item, path=None, **kwargs):
+    """Download a Zotero item's PDF, returning the path it was written to.
+
+    Args:
+        item: a number from the last `list_zotero` listing, a Zotero item key, or an item dict
+        path: where to write the PDF (a temp file if omitted)
+        **kwargs: passed to `_zotero_client`
+    """
+    zot = _zotero_client(**kwargs)
+    if isinstance(item, int): item = _resolve_number(item, 'item')
+    if isinstance(item, str): item = zot.item(item)
+    key = _pdf_key(zot, item)
+    try: content = zot.file(key)
+    except Exception as e: raise RuntimeError(
+        f"Couldn't download the PDF for {_describe(item['data'])!r} ({e}). Zotero serves files "
+        "only when they're stored in your library and synced — linked-file attachments, and "
+        "libraries with file sync off, aren't retrievable through the API."
+    ) from e
+    if path is None:
+        tmp = NamedTemporaryFile(delete=False, suffix='.pdf')
+        tmp.write(content); tmp.close()
+        return Path(tmp.name)
+    path = Path(path)
+    path.write_bytes(content)
+    return path
+
+# %% ../nbs/02-paper2solveit.ipynb #a1f0c21c
+async def zotero_pdf(item, **kwargs):
+    """Turn a PDF from your Zotero library into solveit blocks.
+
+    Pair it with `list_zotero`: list a collection, then pass the number of the paper you want.
+
+        list_zotero('Reading List')
+        await zotero_pdf(3)
+
+    Args:
+        item: a number from the last `list_zotero` listing, a Zotero item key, or an item dict
+        **kwargs: split between `_zotero_client` (library_id, api_key, library_type, local)
+            and `solve_markdown_paper` (e.g. citation_patterns)
+    """
+    zkw = {k: kwargs.pop(k) for k in ('library_id', 'api_key', 'library_type', 'local')
+           if k in kwargs}
+    f = zotero_download(item, **zkw)
+    o = await pdf2md(str(f))
+    await solve_markdown_paper(o["markdown"], **kwargs)
