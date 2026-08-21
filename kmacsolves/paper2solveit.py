@@ -201,7 +201,9 @@ async def solve_markdown_paper(markdown_text, citation_patterns=None, add=None):
     current_header_id = None
     
     for cell in cells:
-        if cell.startswith('##'):
+        # The splitter demotes headers one level and gives each its own single-line cell, so
+        # match any depth — testing for '##' here missed every top-level section of the paper.
+        if cell.startswith('#') and '\n' not in cell:
             # Add header and remember its ID
             current_header_id = await add(content=cell, placement='at_end')
             section_citations[current_header_id] = set()
