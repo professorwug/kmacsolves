@@ -4,8 +4,9 @@
 
 # %% auto #0
 __all__ = ['dlab_params', 'dlab_url', 'submit_marker', 'submit_markers', 'poll_marker', 'poll_markers', 'convert_pdf',
-           'convert_pdfs', 'pdf2md', 'pdfs2md', 'download_to_temp', 'split_markdown_into_cells', 'solve_markdown_paper',
-           'paper2solveit', 'ZoteroListing', 'list_zotero', 'zotero_download', 'zotero_pdf']
+           'convert_pdfs', 'pdf2md', 'pdfs2md', 'download_to_temp', 'split_markdown_into_cells', 'extract_references',
+           'numbered_references', 'cited_numbers', 'solve_markdown_paper', 'paper2solveit', 'ZoteroListing',
+           'list_zotero', 'zotero_download', 'zotero_pdf']
 
 # %% ../nbs/02-paper2solveit.ipynb #d5d73954
 from dialoghelper import *
@@ -159,78 +160,113 @@ def split_markdown_into_cells(markdown_text):
 # %% ../nbs/02-paper2solveit.ipynb #e0d2f51c
 import re
 
+def extract_references(markdown_text):
+    """The bibliography: everything under a References/Bibliography heading.
+
+    Stops at the next heading of the same level or higher, so subsections of the
+    bibliography stay with it. Matching any depth matters — papers head their references
+    with `##` and books with `#`.
+    """
+    m = re.search(r'^(#+)[ \t]*(?:References|Bibliography)[ \t]*$', markdown_text, re.M | re.I)
+    if not m: return ""
+    rest = markdown_text[m.end():]
+    nxt = re.search(rf'^#{{1,{len(m.group(1))}}}(?!#)', rest, re.M)
+    return (rest[:nxt.start()] if nxt else rest).strip()
+
+def numbered_references(refs_section):
+    "Map citation numbers to their entries, for bibliographies that read `[12] Author, ...`."
+    out = {}
+    for m in re.finditer(r'^[ \t]*(?:[-*][ \t]*)?\[(\d+)\][ \t]*(.+?)(?=^[ \t]*(?:[-*][ \t]*)?\[\d+\]|\Z)',
+                         refs_section, re.M | re.S):
+        out[int(m.group(1))] = ' '.join(m.group(2).split())
+    return out
+
+def cited_numbers(text):
+    "The citation numbers a passage refers to, expanding `[3, 5]` and `[7-9]`."
+    out = set()
+    for m in re.finditer(r'\[(\d+)[ \t]*[-–][ \t]*(\d+)\]|\[([\d\s,;]*\d)\]', text):
+        if m.group(1): out |= set(range(int(m.group(1)), int(m.group(2)) + 1))
+        else: out |= {int(n) for n in re.split(r'[,;\s]+', m.group(3)) if n}
+    return out
+
+def _is_heading(cell): return cell.startswith('#') and '\n' not in cell
+
+def _footnote_citations(cell, all_citations, citation_patterns):
+    "Swap author-year citations for numbered markers; returns the new text and what it cited."
+    used = set()
+    for pattern in citation_patterns:
+        for match in re.finditer(pattern, cell):
+            cite = match.group(0)
+            if cite in all_citations:
+                used.add(cite)
+                cell = cell.replace(cite, f"[{all_citations[cite]}]", 1)
+    return cell, used
+
 async def solve_markdown_paper(markdown_text, citation_patterns=None, add=None):
     """Turn a markdown academic paper into appended solveit blocks for incremental reading.
 
     `add` is where the blocks go: `add_msg` by default, which appends to the dialog you're
     reading in. Pass something else — see `NotebookBuilder` — to build a notebook file instead.
+
+    Papers citing as `(Author, 2020)` get their citations replaced by numbered markers.
+    Papers citing as `[12]` are left as they are: the numbering is already the paper's own,
+    and rewriting it would collide with the markers this function emits. Either way each
+    section gets a folded cheatsheet resolving the markers that appear in it.
     """
     if add is None: add = add_msg
-    
+
     if citation_patterns is None:
         citation_patterns = [
             r'\([A-Z][^)]*,\s*\d{4}[a-z]?(?:;\s*[^)]*\d{4}[a-z]?)*\)',  # (Author, 2020)
             r'\([A-Z][^)]*\s+\d{4}[a-z]?(?:;\s*[^)]*\d{4}[a-z]?)*\)'    # (Author 2020)
         ]
-    
-    # Extract references section (only until next ## header)
-    refs_match = re.search(r'^## References\s*\n(.*?)(?=^##|\Z)', 
-                          markdown_text, re.MULTILINE | re.DOTALL)
-    refs_section = refs_match.group(1).strip() if refs_match else ""
-    
-    # Find all unique citations
-    all_citations = {}
-    counter = 1
+
+    refs_section = extract_references(markdown_text)
     cells = split_markdown_into_cells(markdown_text)
-    
-    for cell in cells:
-        for pattern in citation_patterns:
-            for match in re.finditer(pattern, cell):
-                citation = match.group(0)
-                if citation not in all_citations:
-                    all_citations[citation] = counter
-                    counter += 1
-    
+    entries = numbered_references(refs_section)
+    numeric = len(entries) >= 3 and any(cited_numbers(c) & entries.keys() for c in cells)
+
+    # Number the author-year citations in order of first appearance
+    all_citations, counter = {}, 1
+    if not numeric:
+        for cell in cells:
+            for pattern in citation_patterns:
+                for match in re.finditer(pattern, cell):
+                    if match.group(0) not in all_citations:
+                        all_citations[match.group(0)] = counter
+                        counter += 1
+
     # Add full bibliography at start (collapsed)
     if refs_section:
-        await add(content=f"### Full References\n\n{refs_section}", 
-                placement='at_end', i_collapsed=1)
-    
+        await add(content=f"### Full References\n\n{refs_section}", placement='at_end', i_collapsed=1)
+
     # Track sections: {header_id: set_of_citations}
     section_citations = {}
     current_header_id = None
-    
+    in_refs = False
+
     for cell in cells:
-        # The splitter demotes headers one level and gives each its own single-line cell, so
-        # match any depth — testing for '##' here missed every top-level section of the paper.
-        if cell.startswith('#') and '\n' not in cell:
-            # Add header and remember its ID
+        if _is_heading(cell):
+            # The bibliography's own cells cite everything; a cheatsheet there would just
+            # repeat it, so note when we're inside it and collect nothing until we leave.
+            in_refs = bool(re.match(r'#+[ \t]*(?:References|Bibliography)\b', cell, re.I))
             current_header_id = await add(content=cell, placement='at_end')
             section_citations[current_header_id] = set()
+        elif in_refs:
+            await add(content=cell, placement='at_end')
         else:
-            # Replace citations with footnotes
-            modified_cell = cell
-            for pattern in citation_patterns:
-                for match in re.finditer(pattern, cell):
-                    cite_text = match.group(0)
-                    if cite_text in all_citations:
-                        if current_header_id:
-                            section_citations[current_header_id].add(cite_text)
-                        modified_cell = modified_cell.replace(
-                            cite_text, f"[{all_citations[cite_text]}]", 1
-                        )
-            
-            await add(content=modified_cell, placement='at_end')
-    
+            if numeric: text, used = cell, cited_numbers(cell) & entries.keys()
+            else: text, used = _footnote_citations(cell, all_citations, citation_patterns)
+            if current_header_id: section_citations[current_header_id] |= used
+            await add(content=text, placement='at_end')
+
     # Now go back and insert cheatsheets after each header
-    for header_id, citations in section_citations.items():
-        if citations:
-            cheatsheet = "### Citations in this section\n\n" + "\n".join(
-                f"[{all_citations[c]}]: {c}" 
-                for c in sorted(citations, key=lambda x: all_citations[x])
-            )
-            await add(content=cheatsheet, placement='add_after', 
-                    id=header_id, i_collapsed=1)
+    for header_id, used in section_citations.items():
+        if not used: continue
+        lines = ([f"[{n}]: {entries[n]}" for n in sorted(used)] if numeric else
+                 [f"[{all_citations[c]}]: {c}" for c in sorted(used, key=lambda x: all_citations[x])])
+        await add(content="### Citations in this section\n\n" + "\n".join(lines),
+                  placement='add_after', id=header_id, i_collapsed=1)
 
 # %% ../nbs/02-paper2solveit.ipynb #462caa66
 async def paper2solveit(url, **kwargs):
@@ -254,6 +290,7 @@ __all__ = [
     'pdf2md', 'pdfs2md',  # Jeremy's Marker API wrappers
     'download_to_temp',
     'split_markdown_into_cells',
+    'extract_references', 'numbered_references', 'cited_numbers',
     'solve_markdown_paper',
     'paper2solveit',
     'list_zotero', 'zotero_pdf', 'zotero_download', 'ZoteroListing',  # Zotero library support
