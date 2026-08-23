@@ -20,6 +20,7 @@ from IPython.display import Markdown
 from httpx import get as xget,post as xpost
 import time, asyncio, httpx
 from base64 import b64decode
+from hashlib import sha256
 from fastcore.meta import use_kwargs_dict,delegates
 dlab_params = dict(output_format='markdown', force_ocr=False, format_lines=False, paginate=False, use_llm=False,
     strip_existing_ocr=False, disable_image_extraction=False, max_pages=None, page_range=None)
@@ -72,6 +73,18 @@ async def convert_pdfs(files=None, fnames=None, file_urls=None, key=None, max_po
     "Submit multiple PDFs and poll all until complete"
     rs = await submit_markers(files=files, fnames=fnames, file_urls=file_urls, key=key, **kwargs)
     return await poll_markers(rs, key=key, max_polls=max_polls, delay=delay, verbose=verbose)
+def _figure_name(name, blob):
+    """A figure filename unique to the image itself.
+
+    Marker's own names repeat across documents — `<hex>_img.jpg` looks like a digest but isn't
+    one, and `_page_1_Figure_0.jpeg` obviously isn't — so papers sharing a `figures/` directory
+    overwrite each other's images, and only the last one converted renders correctly. Appending a
+    digest of the bytes makes that impossible, and keeps re-converting a paper idempotent — the
+    same image lands on the same name rather than leaving an orphan behind.
+    """
+    name = Path(name)
+    return f"{name.stem}-{sha256(blob).hexdigest()[:12]}{name.suffix}"
+
 def _save_md(r, stem, path):
     path = Path(path)
     figures = path / "figures"
@@ -79,8 +92,10 @@ def _save_md(r, stem, path):
 
     markdown = r["markdown"]
     for name, data in r["images"].items():
-        (figures / name).write_bytes(b64decode(data))
-        markdown = markdown.replace(f"]({name})", f"](figures/{name})")
+        blob = b64decode(data)
+        fig = _figure_name(name, blob)
+        (figures / fig).write_bytes(blob)
+        markdown = markdown.replace(f"]({name})", f"](figures/{fig})")
 
     r["markdown"] = markdown
     (path / f"{stem}.md").write_text(markdown)
